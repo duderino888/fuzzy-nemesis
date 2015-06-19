@@ -2,13 +2,16 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <inttypes.h>
 #include <string.h>
 #include <ctype.h>
 #include <errno.h>
 
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -17,8 +20,10 @@
 #include "log.h"
 
 
-#define SERVER_PORT     12345
-#define MAX_HEADER_LEN  512
+#define SERVER_PORT         12345
+#define SERVER_ROOT         "./www/"
+#define MAX_HEADER_LEN      512
+#define MAX_FILENAME_LEN    256
 
 
 #define streq(A,B)      (strcmp((A), (B)) == 0)
@@ -28,6 +33,8 @@ static void *thread_func(void *);
 static char *strtrim(char *);
 static char *strsplit(char *, const char *);
 static bool parse_request(char *, char **, char **, char **);
+static bool map_path_to_filesystem(char *, size_t, const char *);
+static char *get_mime_type(const char *);
 
 
 int
@@ -92,6 +99,8 @@ thread_func(void *thread_arg)
     FILE *fp = thread_arg;
     char line[MAX_HEADER_LEN];
     char *request = NULL;
+    char file_name[MAX_FILENAME_LEN];
+    int file = -1;
     char *method, *path, *version;
 
 
@@ -114,14 +123,40 @@ thread_func(void *thread_arg)
 
     log_info("Request: %s %s %s", method, path, version);
 
+    if (!map_path_to_filesystem(file_name, sizeof(file_name), path)) {
+        /* TODO: Return a 404. */
+        log_debug("Failed to map path to filesystem");
+        goto cleanup;
+    }
+
+    file = open(file_name, O_RDONLY);
+    if (file == -1) {
+        /* TODO: Return a 404. */
+        log_debug("Failed to open file '%s'", file_name);
+        goto cleanup;
+    }
+    struct stat st;
+    if (fstat(file, &st) != 0) {
+        /* TODO: Return a 500 or something. */
+        log_debug("Failed to fstat file");
+        goto cleanup;
+    }
+
     fprintf(fp, "HTTP/1.1 200 OK\r\n");
     fprintf(fp, "Server: fuzzy-nemesis\r\n");
-    fprintf(fp, "Connection: close\r\n");
+    fprintf(fp, "Content-Type: %s\r\n", get_mime_type(file_name));
+    fprintf(fp, "Content-Length: %"PRIu32"\r\n", (uint32_t)st.st_size);
     fprintf(fp, "\r\n");
-    fprintf(fp, "It works!");
+
+    char buf[512];
+    ssize_t buf_len = 0;
+    while ((buf_len = read(file, buf, sizeof(buf))) > 0) {
+        fwrite(buf, 1, buf_len, fp);
+    }
 
 cleanup:
     free(request);
+    if (file != -1) close(file);
     fclose(fp);
     return 0;
 }
@@ -180,5 +215,63 @@ parse_request(char *request, char **method, char **path, char **ver)
     }
 
     return true;
+}
+
+
+static bool
+map_path_to_filesystem(char *filename, size_t max, const char *path)
+{
+    int len = snprintf(filename, max, "%s/%s", SERVER_ROOT, path);
+    if (len < 0) {
+        return false;
+    }
+
+    if ((size_t)len >= max) {
+        log_debug("Filename too long");
+        return false;
+    }
+
+    char *pos;
+    while ((pos = strstr(filename, "..")) != NULL) {
+        pos[0] = '_';
+        pos[1] = '_';
+    }
+
+    struct stat st;
+    if (stat(filename, &st) != 0) {
+        return false;
+    }
+
+    if (st.st_mode & S_IFDIR) {
+        strncat(filename, "/index.htm", max);
+    }
+
+    return true;
+}
+
+
+static char *
+get_mime_type(const char *filename)
+{
+    char *str = strrchr(filename, '.');
+    if (str) {
+        char ext[32];
+        strncpy(ext, str, sizeof(ext));
+        ext[sizeof(ext)-1] = '\0';
+        for (str = ext; *str; ++str) *str = tolower(*str);
+
+        if (streq(ext, ".htm") || streq(ext, ".html")) {
+            return "text/html";
+        }
+
+        if (streq(ext, ".jpg") || streq(ext, ".jpeg")) {
+            return "image/jpeg";
+        }
+
+        if (streq(ext, ".png")) {
+            return "image/png";
+        }
+    }
+    return "application/octet-stream";
 }
 
