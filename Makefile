@@ -7,7 +7,7 @@ LFLAGS = -lpthread
 .SILENT:
 
 
-debug: -DDEBUG=1 -ggdb
+debug: CFLAGS += -DDEBUG=1 -ggdb
 debug: build
 
 clean:
