@@ -77,7 +77,10 @@ main(void)
         if (pthread_create(&thr, NULL, thread_func, fp) != 0) {
             log_error("Failed to create thread: %d", errno);
             fclose(fp);
+            continue;
         }
+
+        pthread_detach(thr);
     }
     return 0;
 }
